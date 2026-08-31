@@ -12,6 +12,9 @@ dependencies = [
     "patchright>=1.40.0",
     "python-dotenv>=1.1.1",
     "inquirer>=3.4.0",
+    "streamlit>=1.62.0",
+    "google-genai>=2.20.0",
+    "python-jobspy>=1.1.82",
 ]
 
 [project.scripts]
