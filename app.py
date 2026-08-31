@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import json
+import requests
+from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from jobspy import scrape_jobs
 from google import genai
@@ -8,10 +10,21 @@ from google import genai
 st.set_page_config(page_title="Buscador Multi-Portal con Gemini", layout="wide")
 
 st.title("Buscador Inteligente de Empleo Multi-Portal")
-st.caption("LinkedIn | Indeed | Glassdoor | ZipRecruiter — Analizado con Gemini 3.6 Flash")
+st.caption("LinkedIn | Indeed | Computrabajo | Google Jobs (Bumeran/Zonajobs) | Glassdoor — Analizado con Gemini 3.6 Flash")
 
-# Clave predeterminada si existe en Secrets, o entrada manual
+# Clave predeterminada si existe en Secrets
 default_key = st.secrets.get("GEMINI_API_KEY", "")
+
+# --- Configuracion de Paises ---
+COUNTRIES_CONFIG = {
+    "Argentina": {"indeed_code": "argentina", "computrabajo_domain": "ar.computrabajo.com", "default_loc": "Buenos Aires, Argentina"},
+    "Chile": {"indeed_code": "chile", "computrabajo_domain": "cl.computrabajo.com", "default_loc": "Santiago, Chile"},
+    "Colombia": {"indeed_code": "colombia", "computrabajo_domain": "co.computrabajo.com", "default_loc": "Bogota, Colombia"},
+    "Espana": {"indeed_code": "spain", "computrabajo_domain": "es.computrabajo.com", "default_loc": "Madrid, Espana"},
+    "Mexico": {"indeed_code": "mexico", "computrabajo_domain": "mx.computrabajo.com", "default_loc": "Ciudad de Mexico, Mexico"},
+    "Uruguay": {"indeed_code": "uruguay", "computrabajo_domain": "uy.computrabajo.com", "default_loc": "Montevideo, Uruguay"},
+    "Estados Unidos": {"indeed_code": "usa", "computrabajo_domain": None, "default_loc": "United States"}
+}
 
 # --- Barra lateral: Filtros de Busqueda ---
 with st.sidebar:
@@ -25,15 +38,27 @@ with st.sidebar:
     )
     st.markdown("---")
     
+    selected_country_name = st.selectbox(
+        "Pais de busqueda:",
+        options=list(COUNTRIES_CONFIG.keys()),
+        index=0  # Argentina por defecto
+    )
+    country_info = COUNTRIES_CONFIG[selected_country_name]
+    
     selected_sites = st.multiselect(
         "Portales a rastrear:",
-        options=["linkedin", "indeed", "glassdoor", "zip_recruiter"],
-        default=["linkedin", "indeed"],
-        help="Puedes combinar varios portales simultaneamente"
+        options=["linkedin", "indeed", "computrabajo", "google", "glassdoor", "zip_recruiter"],
+        default=["linkedin", "indeed", "computrabajo", "google"],
+        help="Google Jobs indexa automaticamente vacantes de Bumeran y Zonajobs"
     )
     
-    keywords = st.text_input("Puesto o Palabras Clave:", value="Analista Financiero")
-    location = st.text_input("Ubicacion:", value="Buenos Aires, Argentina")
+    keywords = st.text_input(
+        "Puesto o Palabras Clave (Opcional):", 
+        value="", 
+        placeholder="Ej: Finanzas, Contable, Data (vacio para ver todo)"
+    )
+    
+    location = st.text_input("Ubicacion / Ciudad:", value=country_info["default_loc"])
     
     time_options = {
         "Ultimas 24 horas": 24,
@@ -77,9 +102,8 @@ if uploaded_cv is not None:
     except Exception as e:
         st.error(f"Error al leer el archivo PDF: {e}")
 
-# Plantilla autocompletable
 template_criteria = """- Nivel del puesto: [Pasantia / Trainee / Junior / Semi-Senior]
-- Carrera o Area/Especialidad de interes: [Finanzas corporativas / Control de gestion / Analisis de datos]
+- Area o especialidad de interes: [Finanzas corporativas / Control de gestion / Analisis de datos]
 - Modalidad de trabajo preferida: [Hibrida / Remota / Presencial]
 - Factores a priorizar: [Empresas con plan de carrera, capacitacion constante]
 - Condiciones a descartar: [Puestos senior, ventas 100% a comision, cobranzas telefonicas]"""
@@ -90,41 +114,86 @@ user_criteria = st.text_area(
     height=140
 )
 
-# Integrar perfil de CV con criterios adicionales
 if cv_extracted_text:
     candidate_profile = f"INFORMACION DEL CV:\n{cv_extracted_text}\n\nPREFERENCIAS Y CONDICIONES ADICIONALES:\n{user_criteria}"
 else:
     candidate_profile = user_criteria
 
-def fetch_multisite_jobs(sites: list, query: str, loc: str, limit: int, hours: int, is_remote: bool):
-    try:
-        jobs_df = scrape_jobs(
-            site_name=sites,
-            search_term=query,
-            location=loc,
-            results_wanted=limit,
-            hours_old=hours,
-            is_remote=is_remote,
-            country_indeed="argentina"
-        )
-        
-        if jobs_df is None or jobs_df.empty:
-            return []
-        
-        standardized_jobs = []
-        for _, row in jobs_df.iterrows():
-            standardized_jobs.append({
-                "portal": str(row.get("site", "N/A")).upper(),
-                "titulo": str(row.get("title", "Sin titulo")),
-                "empresa": str(row.get("company", "No especificada")),
-                "ubicacion": str(row.get("location", loc)),
-                "enlace": str(row.get("job_url", "#"))
-            })
-        return standardized_jobs
-        
-    except Exception as e:
-        st.error(f"Error durante el rastreo de ofertas: {e}")
+def scrape_computrabajo(query: str, domain: str, loc: str, limit: int):
+    """Rastrea vacantes desde Computrabajo para el pais seleccionado."""
+    if not domain:
         return []
+    
+    jobs = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    clean_query = query.strip().replace(" ", "-") if query.strip() else "empleos"
+    url = f"https://{domain}/trabajo-de-{clean_query}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            cards = soup.select("article.box_offer, article.bClick")
+            
+            for card in cards[:limit]:
+                title_elem = card.select_one("h2 a, h1 a, a.js-o-link")
+                comp_elem = card.select_one("p.fc_base, a.fc_base")
+                loc_elem = card.select_one("span.fc_aux, p.fs16")
+                
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    link = "https://" + domain + title_elem.get("href", "")
+                    company = comp_elem.get_text(strip=True) if comp_elem else "Empresa Confidencial"
+                    location_job = loc_elem.get_text(strip=True) if loc_elem else loc
+                    
+                    jobs.append({
+                        "portal": "COMPUTRABAJO",
+                        "titulo": title,
+                        "empresa": company,
+                        "ubicacion": location_job,
+                        "enlace": link
+                    })
+    except Exception:
+        pass
+    return jobs
+
+def fetch_multisite_jobs(sites: list, query: str, loc: str, limit: int, hours: int, is_remote: bool, country_code: str, comp_domain: str):
+    all_jobs = []
+    
+    # 1. Scraping con JobSpy para portales compatibles
+    jobspy_sites = [s for s in sites if s in ["linkedin", "indeed", "glassdoor", "zip_recruiter", "google"]]
+    search_term = query.strip() if query.strip() else "empleos"
+    
+    if jobspy_sites:
+        try:
+            jobs_df = scrape_jobs(
+                site_name=jobspy_sites,
+                search_term=search_term,
+                location=loc,
+                results_wanted=limit,
+                hours_old=hours,
+                is_remote=is_remote,
+                country_indeed=country_code
+            )
+            
+            if jobs_df is not None and not jobs_df.empty:
+                for _, row in jobs_df.iterrows():
+                    all_jobs.append({
+                        "portal": str(row.get("site", "N/A")).upper(),
+                        "titulo": str(row.get("title", "Sin titulo")),
+                        "empresa": str(row.get("company", "No especificada")),
+                        "ubicacion": str(row.get("location", loc)),
+                        "enlace": str(row.get("job_url", "#"))
+                    })
+        except Exception as e:
+            st.error(f"Error durante el rastreo en portales internacionales: {e}")
+
+    # 2. Scraping de Computrabajo si esta seleccionado
+    if "computrabajo" in sites and comp_domain:
+        comp_jobs = scrape_computrabajo(query, comp_domain, loc, limit=int(limit / 2) + 5)
+        all_jobs.extend(comp_jobs)
+        
+    return all_jobs
 
 def analyze_jobs_with_gemini(jobs: list, criteria: str, key: str):
     client = genai.Client(api_key=key)
@@ -132,7 +201,7 @@ def analyze_jobs_with_gemini(jobs: list, criteria: str, key: str):
     prompt = f"""
     Eres un consultor senior de seleccion de talento.
     
-    Lista de {len(jobs)} ofertas laborales:
+    Lista de {len(jobs)} ofertas laborales recopiladas:
     {json.dumps(jobs, indent=2, ensure_ascii=False)}
     
     Perfil y criterios del candidato:
@@ -167,7 +236,7 @@ def analyze_jobs_with_gemini(jobs: list, criteria: str, key: str):
 def generate_cover_message(job_title: str, company: str, criteria: str, key: str):
     client = genai.Client(api_key=key)
     prompt = f"""
-    Redacta un mensaje de contacto directo para LinkedIn (maximo 70 palabras), formal y conciso, dirigido al reclutador de la vacante "{job_title}" en la empresa "{company}".
+    Redacta un mensaje de contacto directo para postulacion (maximo 70 palabras), formal y conciso, dirigido al reclutador de la vacante "{job_title}" en la empresa "{company}".
     
     Contexto del candidato:
     "{criteria}"
@@ -187,13 +256,22 @@ if st.button("Buscar y Clasificar Ofertas", type="primary"):
     elif not selected_sites:
         st.warning("Selecciona al menos un portal en la barra lateral.")
     else:
-        with st.spinner(f"Fase 1/2: Rastreando ofertas ({selected_time_label.lower()}) en {', '.join(selected_sites).upper()}..."):
-            raw_jobs = fetch_multisite_jobs(selected_sites, keywords, location, max_results, hours_filter, only_remote)
+        with st.spinner(f"Fase 1/2: Rastreando ofertas en {selected_country_name} ({selected_time_label.lower()})..."):
+            raw_jobs = fetch_multisite_jobs(
+                sites=selected_sites,
+                query=keywords,
+                loc=location,
+                limit=max_results,
+                hours=hours_filter,
+                is_remote=only_remote,
+                country_code=country_info["indeed_code"],
+                comp_domain=country_info["computrabajo_domain"]
+            )
 
         if not raw_jobs:
-            st.warning("No se encontraron ofertas con esos filtros temporales. Prueba ampliando el rango de tiempo o los terminos.")
+            st.warning("No se encontraron ofertas con esos filtros. Prueba ampliando el rango de tiempo o seleccionando mas portales.")
         else:
-            st.info(f"Se recopilaron {len(raw_jobs)} vacantes. Enviando a Gemini para evaluacion...")
+            st.info(f"Se recopilaron {len(raw_jobs)} vacantes en total. Enviando a Gemini para evaluacion...")
             
             with st.spinner("Fase 2/2: Gemini esta evaluando y ordenando las vacantes segun tu perfil..."):
                 try:
@@ -223,9 +301,10 @@ if 'analyzed_jobs' in st.session_state and st.session_state['analyzed_jobs']:
     
     for i, job in enumerate(jobs_list):
         score = job.get('match_score', 0)
+        score_icon = "🟢" if score >= 75 else "🟡" if score >= 50 else "🔴"
         portal = job.get('portal', 'WEB')
         
-        with st.expander(f"[{score}% Match] [{portal}] {job.get('titulo')} — {job.get('empresa')}"):
+        with st.expander(f"{score_icon} [{score}% Match] [{portal}] {job.get('titulo')} — {job.get('empresa')}"):
             st.write(f"**Ubicacion:** {job.get('ubicacion')}")
             st.write(f"**Analisis de compatibilidad:** {job.get('motivo_match')}")
             
@@ -234,7 +313,7 @@ if 'analyzed_jobs' in st.session_state and st.session_state['analyzed_jobs']:
                 st.link_button(f"Abrir postulacion en {portal}", job.get('enlace'))
             
             with col2:
-                if st.button(f"Generar mensaje de contacto", key=f"msg_{i}"):
+                if st.button("Generar mensaje de contacto", key=f"msg_{i}"):
                     with st.spinner("Redactando mensaje..."):
                         cover_letter = generate_cover_message(job.get('titulo'), job.get('empresa'), candidate_profile, api_key)
                         st.text_area("Mensaje listo para enviar al reclutador:", value=cover_letter, height=120)
