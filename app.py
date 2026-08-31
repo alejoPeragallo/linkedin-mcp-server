@@ -13,7 +13,7 @@ st.caption("LinkedIn | Indeed | Glassdoor | ZipRecruiter — Analizado con Gemin
 # Clave predeterminada si existe en Secrets, o entrada manual
 default_key = st.secrets.get("GEMINI_API_KEY", "")
 
-# --- Barra lateral: Filtros de Búsqueda ---
+# --- Barra lateral: Filtros de Busqueda ---
 with st.sidebar:
     st.header("Configuracion")
     
@@ -77,10 +77,17 @@ if uploaded_cv is not None:
     except Exception as e:
         st.error(f"Error al leer el archivo PDF: {e}")
 
+# Plantilla autocompletable
+template_criteria = """- Nivel del puesto: [Pasantia / Trainee / Junior / Semi-Senior]
+- Carrera o Area/Especialidad de interes: [Finanzas corporativas / Control de gestion / Analisis de datos]
+- Modalidad de trabajo preferida: [Hibrida / Remota / Presencial]
+- Factores a priorizar: [Empresas con plan de carrera, capacitacion constante]
+- Condiciones a descartar: [Puestos senior, ventas 100% a comision, cobranzas telefonicas]"""
+
 user_criteria = st.text_area(
-    "Criterios de busqueda, intereses o condiciones especificas:",
-    value="Busco posiciones junior o pasantias orientadas a finanzas corporativas, control de gestion o analisis de datos. Modalidad hibrida o remota. Valora empresas con plan de carrera y descarta puestos senior o de ventas comisionadas.",
-    height=90
+    "Criterios de busqueda y condiciones (completa los campos entre corchetes):",
+    value=template_criteria,
+    height=140
 )
 
 # Integrar perfil de CV con criterios adicionales
