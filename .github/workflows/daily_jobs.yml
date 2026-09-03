@@ -29,5 +29,5 @@ jobs:
         run: >
           uv run --no-project --python 3.12
           --with beautifulsoup4 --with groq --with python-jobspy
-          --with openpyxl --with requests --with pandas
+          --with openpyxl --with requests --with pandas --with json-repair
           batch_runner.py

@@ -13,6 +13,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import requests
+from json_repair import repair_json
 
 # --- Credenciales configuradas ---
 MI_GMAIL = os.getenv("EMAIL_SENDER", "")
@@ -220,9 +221,8 @@ def evaluar_lote_groq(client, batch_jobs: list, criterios: str) -> list:
       if raw_text.startswith("```"):
         raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-      parsed = json.loads(raw_text)
+      parsed = json.loads(repair_json(raw_text))
       
-      # Extraer la lista de evaluaciones independientemente de cómo la devuelva el JSON
       evaluaciones = []
       if isinstance(parsed, dict):
         for v in parsed.values():
@@ -268,12 +268,17 @@ def evaluar_lote_groq(client, batch_jobs: list, criterios: str) -> list:
         )
         time.sleep(espera)
       else:
-        print(f"      [Error de API Groq] {e}")
-        break
+        print(f"      [Error de API Groq, intento {intento + 1}/4] {e}")
+        time.sleep(5)
 
-  print("      [Error critico] Se omite este bloque tras agotar los reintentos.")
-  return []
-
+  print("      [Aviso] Se agotaron los reintentos para este bloque. Rescatando ofertas sin clasificacion IA.")
+  lote_de_emergencia = []
+  for original in batch_jobs:
+    job_fallido = original.copy()
+    job_fallido["match_score"] = 50
+    job_fallido["motivo_match"] = "[Aviso] No analizado por la IA (error de respuesta del proveedor). Revisar manualmente."
+    lote_de_emergencia.append(job_fallido)
+  return lote_de_emergencia
 
 def aplicar_filtro_geografico(jobs: list) -> list:
   for job in jobs:
