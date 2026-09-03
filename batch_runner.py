@@ -162,19 +162,13 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
     ]
     """
 
-  # Si el modelo principal esta congestionado (503), rota a modelos alternativos
-  modelos = [
-      "gemini-2.5-flash",
-      "gemini-1.5-flash",
-      "gemini-2.5-flash",
-      "gemini-1.5-flash",
-  ]
+  # Tiempos de espera largos (Filosofia: Resiliencia sobre velocidad)
+  tiempos_espera = [30, 60, 90]
 
   for intento in range(4):
-    modelo_actual = modelos[intento]
     try:
       res = client.models.generate_content(
-          model=modelo_actual,
+          model="gemini-3.6-flash",
           contents=prompt,
           config={"response_mime_type": "application/json"},
       )
@@ -208,17 +202,14 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
       return lote_completo
 
     except Exception as e:
-      espera = (intento + 1) * 10
-      print(
-          f"      [Intento {intento + 1}/4 con {modelo_actual}] Error:"
-          f" {e}. Reintentando en {espera}s..."
-      )
-      time.sleep(espera)
+      if intento < 3:
+        espera = tiempos_espera[intento]
+        print(f"      [Aviso Google API - Intento {intento + 1}/4 fallido]: {e}")
+        print(f"      Pausando {espera} segundos para garantizar descongestion...")
+        time.sleep(espera)
+      else:
+        print(f"      [Error critico] Se omite este bloque tras 4 intentos. Error: {e}")
 
-  print(
-      "      [Aviso] Se omite este bloque puntual tras 4 intentos para no"
-      " frenar la corrida."
-  )
   return []
 
 
@@ -229,28 +220,23 @@ def evaluar_con_gemini(jobs: list, criterios: str) -> list:
   api_key = os.getenv("GEMINI_API_KEY", "")
   client = genai.Client(api_key=api_key)
 
-  # Bloques de 20 ofertas: se procesan mas rapido y evitan sobrecargar la API
   TAMANO_LOTE = 20
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
-  print(
-      f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de"
-      f" {TAMANO_LOTE}..."
-  )
+  print(f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de {TAMANO_LOTE}...")
 
   todos_evaluados = []
   for i in range(0, len(jobs), TAMANO_LOTE):
     num_bloque = (i // TAMANO_LOTE) + 1
     batch = jobs[i : i + TAMANO_LOTE]
-    print(
-        f"      -> Procesando bloque {num_bloque}/{total_bloques} ({len(batch)}"
-        " ofertas)..."
-    )
+    print(f"      -> Procesando bloque {num_bloque}/{total_bloques} ({len(batch)} ofertas)...")
+    
     evaluated_batch = evaluar_lote_gemini(client, batch, criterios)
     todos_evaluados.extend(evaluated_batch)
-    time.sleep(2)
+    
+    # Pausa de cortesia entre bloques exitosos para cuidar la cuota
+    time.sleep(5) 
 
   return todos_evaluados
-
 
 def armar_excel(jobs: list) -> bytes:
   df = pd.DataFrame(jobs)
