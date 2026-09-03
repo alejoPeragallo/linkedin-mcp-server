@@ -7,8 +7,7 @@ from pathlib import Path
 import smtplib
 import time
 from bs4 import BeautifulSoup
-from google import genai
-from google.genai.errors import APIError, ServerError
+from groq import Groq
 from jobspy import scrape_jobs
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -18,12 +17,10 @@ import requests
 # --- Credenciales configuradas ---
 MI_GMAIL = os.getenv("EMAIL_SENDER", "")
 MI_CLAVE_16_LETRAS = os.getenv("EMAIL_PASSWORD", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# Modo de prueba: si esta en "1", NO se llama a la API de Gemini real.
-# Se generan scores/justificaciones simuladas para poder probar todo
-# el resto del pipeline (scraping, excel, mail) sin gastar cuota.
-DRY_RUN = os.getenv("GEMINI_DRY_RUN", "0") == "1"
+# Modo de prueba: si esta en "1", NO se llama a la API de Groq real.
+DRY_RUN = os.getenv("GROQ_DRY_RUN", os.getenv("GEMINI_DRY_RUN", "0")) == "1"
 
 COUNTRIES_CONFIG = {
     "Argentina": {
@@ -41,10 +38,6 @@ COUNTRIES_CONFIG = {
     "Estados Unidos": {"indeed_code": "usa", "computrabajo_domain": None},
 }
 
-# Provincias/ciudades argentinas que NO son Buenos Aires. Se usan como red
-# de seguridad despues de la evaluacion de Gemini: si el LLM se "olvida"
-# de aplicar el filtro geografico que le pedimos en el prompt, esto lo
-# corrige igual de forma deterministica.
 PROVINCIAS_EXCLUIDAS = [
     "cordoba", "córdoba", "santa fe", "rosario", "mendoza",
     "salta", "tucuman", "tucumán", "neuquen", "neuquén",
@@ -160,29 +153,46 @@ def _prompt_evaluacion(items_minimos: list, criterios: str) -> str:
     - Filtro de Ubicacion: El candidato reside en Buenos Aires. Si una vacante es presencial o hibrida en otra provincia (ej. Cordoba, Santa Fe, Mendoza), asigna un match_score menor a 30. Solo acepta vacantes de otras provincias si la modalidad es expresamente 100% Remota.
     - match_score: entero de 0 a 100 indicando afinidad real.
     - motivo_match: justificacion concisa de 2 lineas aclarando por que encaja o por que se descarta.
-    - Devuelve UNICAMENTE un arreglo JSON:
-    [
-      {{
-        "id": 0,
-        "match_score": 85,
-        "motivo_match": "..."
-      }}
-    ]
+    - Devuelve UNICAMENTE un objeto JSON con una clave "evaluaciones" que contenga un arreglo de resultados con la siguiente estructura exacta:
+    {{
+      "evaluaciones": [
+        {{
+          "id": 0,
+          "match_score": 85,
+          "motivo_match": "..."
+        }}
+      ]
+    }}
     """
 
 
 def _evaluacion_simulada(batch_jobs: list) -> list:
-  """Genera evaluaciones falsas para probar el pipeline sin llamar a la API."""
   lote_completo = []
   for job in batch_jobs:
     job_evaluado = job.copy()
     job_evaluado["match_score"] = random.randint(40, 95)
-    job_evaluado["motivo_match"] = "[DRY RUN] Evaluacion simulada, no se llamo a Gemini."
+    job_evaluado["motivo_match"] = "[DRY RUN] Evaluacion simulada, no se llamo a Groq."
     lote_completo.append(job_evaluado)
   return lote_completo
 
 
-def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
+def obtener_modelo_groq(client) -> str:
+  """Selecciona dinámicamente un modelo de texto válido en Groq."""
+  try:
+    lista_modelos = client.models.list().data
+    palabras_excluidas = ["whisper", "guard", "safeguard", "audio", "orpheus"]
+    modelos_validos = [
+        m.id for m in lista_modelos 
+        if not any(excluida in m.id.lower() for excluida in palabras_excluidas)
+    ]
+    if modelos_validos:
+      return modelos_validos[0]
+  except Exception as e:
+    print(f"      [Aviso Groq] No se pudo listar modelos dinámicamente: {e}")
+  return "qwen/qwen3.8-27b"
+
+
+def evaluar_lote_groq(client, batch_jobs: list, criterios: str) -> list:
   if DRY_RUN:
     return _evaluacion_simulada(batch_jobs)
 
@@ -196,25 +206,34 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
       for i, job in enumerate(batch_jobs)
   ]
   prompt = _prompt_evaluacion(items_minimos, criterios)
+  modelo = obtener_modelo_groq(client)
 
   for intento in range(4):
     try:
-      res = client.models.generate_content(
-          model="gemini-3.6-flash",
-          contents=prompt,
-          config={"response_mime_type": "application/json"},
+      chat_completion = client.chat.completions.create(
+          messages=[{"role": "user", "content": prompt}],
+          model=modelo,
+          response_format={"type": "json_object"},
+          temperature=0.2,
       )
 
-      raw_text = res.text.strip()
+      raw_text = chat_completion.choices[0].message.content.strip()
       if raw_text.startswith("```"):
         raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-      evaluaciones = json.loads(raw_text)
-      if isinstance(evaluaciones, dict):
-        for v in evaluaciones.values():
+      parsed = json.loads(raw_text)
+      
+      # Extraer la lista de evaluaciones independientemente de cómo la devuelva el JSON
+      evaluaciones = []
+      if isinstance(parsed, dict):
+        for v in parsed.values():
           if isinstance(v, list):
             evaluaciones = v
             break
+        if not evaluaciones and "id" in parsed:
+          evaluaciones = [parsed]
+      elif isinstance(parsed, list):
+        evaluaciones = parsed
 
       eval_map = {
           item.get("id"): item
@@ -233,59 +252,31 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
 
       return lote_completo
 
-    except APIError as e:
-      codigo = getattr(e, "code", None)
-      mensaje = str(e).lower()
-
-      if codigo == 429:
-        # RPD (cupo diario) no tiene sentido reintentarlo: no se va a
-        # resolver hasta que resetee la cuota (medianoche hora Pacifico).
-        if "per day" in mensaje or "perday" in mensaje or "rpd" in mensaje or "daily" in mensaje:
-          print(
-              f"      [Cupo diario agotado] No tiene sentido reintentar hoy."
-              f" Se aborta esta corrida. Detalle: {e}"
-          )
-          raise
-        espera = 65
-        print(
-            f"      [429 - limite por minuto, intento {intento + 1}/4]"
-            f" Esperando {espera}s. Detalle: {e}"
-        )
-        time.sleep(espera)
-
-      elif codigo == 503:
-        espera = [15, 30, 60][min(intento, 2)]
-        print(
-            f"      [503 - servidor saturado, intento {intento + 1}/4]"
-            f" Esperando {espera}s. Detalle: {e}"
-        )
-        time.sleep(espera)
-
-      else:
-        # Errores como 400 (prompt invalido) o 403 (clave/permmisos) son
-        # permanentes: reintentar no cambia nada, mejor cortar ya.
-        print(f"      [Error no recuperable de la API] {e}")
-        break
-
-    except ServerError as e:
-      espera = [15, 30, 60][min(intento, 2)]
-      print(
-          f"      [Servidor no disponible, intento {intento + 1}/4]"
-          f" Esperando {espera}s. Detalle: {e}"
-      )
-      time.sleep(espera)
-
     except Exception as e:
-      print(f"      [Error inesperado, intento {intento + 1}/4]: {e}")
-      break
+      mensaje = str(e).lower()
+      if "429" in mensaje or "rate_limit" in mensaje:
+        espera = 20 * (intento + 1)
+        print(
+            f"      [429 - Limite de Groq, intento {intento + 1}/4]"
+            f" Esperando {espera}s. Detalle: {e}"
+        )
+        time.sleep(espera)
+      elif "503" in mensaje or "overloaded" in mensaje:
+        espera = [10, 20, 40][min(intento, 2)]
+        print(
+            f"      [503 - Servidor Groq saturado, intento {intento + 1}/4]"
+            f" Esperando {espera}s. Detalle: {e}"
+        )
+        time.sleep(espera)
+      else:
+        print(f"      [Error de API Groq] {e}")
+        break
 
   print("      [Error critico] Se omite este bloque tras agotar los reintentos.")
   return []
 
 
 def aplicar_filtro_geografico(jobs: list) -> list:
-  """Red de seguridad: si Gemini no respeto el filtro geografico del
-  prompt, esto lo corrige de forma deterministica en Python."""
   for job in jobs:
     ubicacion = job.get("ubicacion", "").lower()
     es_remoto = any(p in ubicacion for p in ("remoto", "remote", "home office"))
@@ -301,26 +292,24 @@ def aplicar_filtro_geografico(jobs: list) -> list:
   return jobs
 
 
-def evaluar_con_gemini(jobs: list, criterios: str) -> list:
+def evaluar_con_groq(jobs: list, criterios: str) -> list:
   if not jobs:
     return []
 
   client = None
   if not DRY_RUN:
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    client = genai.Client(api_key=api_key)
+    api_key = os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+      raise RuntimeError("Falta configurar la variable de entorno GROQ_API_KEY.")
+    client = Groq(api_key=api_key)
 
-  # Lotes mas chicos y pausas mas largas entre bloques para quedar comodos
-  # bajo el limite de ~15 pedidos por minuto de la capa gratuita. Como este
-  # script corre una vez al dia, no hay apuro: preferimos ir lento y
-  # confiable a rapido y arriesgar un 429.
   TAMANO_LOTE = 30
-  PAUSA_ENTRE_BLOQUES = 8
+  PAUSA_ENTRE_BLOQUES = 3
 
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
-  print(f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de {TAMANO_LOTE}...")
+  print(f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de {TAMANO_LOTE} con Groq...")
   if DRY_RUN:
-    print("    [DRY RUN activo] No se va a llamar a la API real de Gemini.")
+    print("    [DRY RUN activo] No se va a llamar a la API real de Groq.")
 
   todos_evaluados = []
   for i in range(0, len(jobs), TAMANO_LOTE):
@@ -328,13 +317,7 @@ def evaluar_con_gemini(jobs: list, criterios: str) -> list:
     batch = jobs[i : i + TAMANO_LOTE]
     print(f"      -> Procesando bloque {num_bloque}/{total_bloques} ({len(batch)} ofertas)...")
 
-    try:
-      evaluated_batch = evaluar_lote_gemini(client, batch, criterios)
-    except APIError:
-      # Cupo diario agotado: no seguimos gastando tiempo en mas bloques.
-      print("    Se corta la evaluacion del resto de los bloques por hoy.")
-      break
-
+    evaluated_batch = evaluar_lote_groq(client, batch, criterios)
     todos_evaluados.extend(evaluated_batch)
 
     if not DRY_RUN and num_bloque < total_bloques:
@@ -495,7 +478,7 @@ def procesar_todos_los_perfiles():
 
   print(f"=== Procesando {len(archivos_json)} perfil(es) en cola ===")
   if DRY_RUN:
-    print("=== MODO DRY RUN ACTIVO: no se va a llamar a la API de Gemini ===")
+    print("=== MODO DRY RUN ACTIVO: no se va a llamar a la API de Groq ===")
 
   for archivo in archivos_json:
     with open(archivo, "r", encoding="utf-8") as f:
@@ -520,22 +503,28 @@ def procesar_todos_los_perfiles():
     print("  1. Rastreando portales multi-termino...")
     raw_jobs = fetch_jobs_candidato(config)
 
-    # --- NUEVA RED DE SEGURIDAD PARA CUOTA API ---
-    # Limita la evaluacion a un maximo de 60 ofertas por persona
+    palabras_prohibidas = ["senior", "sr", "gerente", "jefe", "lead", "manager", "director", "jefatura"]
+    
+    ofertas_limpias = []
+    for job in raw_jobs:
+        titulo_lower = job.get("titulo", "").lower()
+        if not any(prohibida in titulo_lower for prohibida in palabras_prohibidas):
+            ofertas_limpias.append(job)
+            
+    raw_jobs = ofertas_limpias
+
     if len(raw_jobs) > 60:
-      print(f"  [Aviso] Se redujo de {len(raw_jobs)} a 60 vacantes para conservar cuota.")
+      print(f"  [Aviso] Se redujo a 60 vacantes con potencial para conservar cuota.")
       raw_jobs = raw_jobs[:60]
-    # ---------------------------------------------
 
     if not raw_jobs:
       print("  No se encontraron ofertas hoy para este perfil.")
       continue
     
-    # Imprimimos el numero real que va a ir a la API
     print(f"  Total vacantes unicas a evaluar: {len(raw_jobs)}")
 
-    print("  2. Evaluando con Gemini 3.6 Flash...")
-    evaluated_jobs = evaluar_con_gemini(raw_jobs, criterios)
+    print("  2. Evaluando con Groq (IA)...")
+    evaluated_jobs = evaluar_con_groq(raw_jobs, criterios)
 
     filtered_jobs = [
         j for j in evaluated_jobs if j.get("match_score", 0) >= min_score
@@ -555,7 +544,6 @@ def procesar_todos_los_perfiles():
     )
     excel_bytes = armar_excel(filtered_jobs)
 
-    # Copia de seguridad en disco
     respaldo_nombre = f"Ultimo_Reporte_{nombre.replace(' ', '_')}.xlsx"
     with open(respaldo_nombre, "wb") as f:
       f.write(excel_bytes)

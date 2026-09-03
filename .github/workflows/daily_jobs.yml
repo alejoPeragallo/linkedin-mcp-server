@@ -22,17 +22,12 @@ jobs:
       - name: Ejecutar script multi-perfil
         env:
           PYTHONUNBUFFERED: "1"
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          GEMINI_DRY_RUN: ${{ vars.GEMINI_DRY_RUN }} 
-        # --no-project evita tocar el pyproject.toml del repo (es de otro
-        # proyecto, linkedin-mcp-server, y no queremos construirlo ni
-        # sincronizarlo). --with arma un entorno aislado y efimero con
-        # exactamente lo que batch_runner.py necesita, incluido pandas
-        # (que faltaba en el pyproject.toml existente).
+          GROQ_DRY_RUN: ${{ vars.GROQ_DRY_RUN }} 
         run: >
           uv run --no-project --python 3.12
-          --with beautifulsoup4 --with google-genai --with python-jobspy
+          --with beautifulsoup4 --with groq --with python-jobspy
           --with openpyxl --with requests --with pandas
           batch_runner.py
