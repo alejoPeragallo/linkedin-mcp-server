@@ -314,7 +314,7 @@ def evaluar_con_gemini(jobs: list, criterios: str) -> list:
   # bajo el limite de ~15 pedidos por minuto de la capa gratuita. Como este
   # script corre una vez al dia, no hay apuro: preferimos ir lento y
   # confiable a rapido y arriesgar un 429.
-  TAMANO_LOTE = 25
+  TAMANO_LOTE = 30
   PAUSA_ENTRE_BLOQUES = 8
 
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
