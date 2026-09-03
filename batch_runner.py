@@ -149,9 +149,10 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
     Criterios y perfil del postulante:
     "{criterios}"
 
-    Instrucciones:
+    Instrucciones estrictas:
+    - Revisa la ubicacion de cada oferta contra los criterios de residencia y modalidad. Si una vacante exige presencia fisica o es hibrida en otra provincia/ciudad distinta a la del candidato, asigna un match_score menor a 30 (salvo que sea 100% remota).
     - match_score: entero de 0 a 100 indicando afinidad real.
-    - motivo_match: justificacion concisa de 2 lineas.
+    - motivo_match: justificacion concisa de 2 lineas aclarando por que encaja o por que se descarta.
     - Devuelve UNICAMENTE un arreglo JSON con el siguiente formato:
     [
       {{
