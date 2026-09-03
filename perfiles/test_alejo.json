@@ -1,0 +1,19 @@
+{
+  "activo": true,
+  "nombre": "Alejo Peragallo",
+  "email": "alejoperagallo00@gmail.com",
+  "pais": "Argentina",
+  "ubicacion": "Buenos Aires, Argentina",
+  "palabras_clave": [
+    "Pasantia Finanzas",
+    "Analista Finanzas Junior"
+  ],
+  "score_minimo": 70,
+  "criterios": [
+    "Carrera / Perfil: Estudiante de Finanzas en busqueda de pasantia o rol Junior",
+    "Puestos afines: Finanzas corporativas, FP&A, Planeamiento Financiero, Analista de Datos Financiero",
+    "Herramientas: Excel avanzado, Power BI, SQL, Python",
+    "Modalidad: Hibrida o Remota preferentemente",
+    "Descartar: Puestos Senior (+3 anos) y atencion telefonica de call center"
+  ]
+}

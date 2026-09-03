@@ -129,18 +129,20 @@ def fetch_jobs_candidato(config: dict) -> list:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "TU_NUEVA_CLAVE_AQUI")
 
 def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
-    items_minimos = [
-        {
-            "id": i,
-            "titulo": job.get("titulo", ""),
-            "empresa": job.get("empresa", ""),
-            "ubicacion": job.get("ubicacion", "")
-        }
-        for i, job in enumerate(batch_jobs)
-    ]
-    
-    prompt = f"""
+  # 1. Enviar solo lo esencial para ahorrar tokens y acelerar la respuesta
+  items_minimos = [
+      {
+          "id": i,
+          "titulo": job.get("titulo", ""),
+          "empresa": job.get("empresa", ""),
+          "ubicacion": job.get("ubicacion", ""),
+      }
+      for i, job in enumerate(batch_jobs)
+  ]
+
+  prompt = f"""
     Eres un reclutador corporativo evaluando ofertas laborales.
+    
     Vacantes a evaluar:
     {json.dumps(items_minimos, ensure_ascii=False)}
 
@@ -148,9 +150,9 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
     "{criterios}"
 
     Instrucciones:
-    - match_score: entero de 0 a 100.
+    - match_score: entero de 0 a 100 indicando afinidad real.
     - motivo_match: justificacion concisa de 2 lineas.
-    - Devuelve UNICAMENTE un arreglo JSON:
+    - Devuelve UNICAMENTE un arreglo JSON con el siguiente formato:
     [
       {{
         "id": 0,
@@ -159,37 +161,65 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
       }}
     ]
     """
-    
-    for intento in range(1, 4):
-        try:
-            res = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            evaluaciones = json.loads(res.text)
-            
-            eval_map = {item.get("id"): item for item in evaluaciones}
-            lote_completo = []
-            for i, original in enumerate(batch_jobs):
-                datos_eval = eval_map.get(i, {})
-                job_evaluado = original.copy()
-                job_evaluado["match_score"] = datos_eval.get("match_score", 0)
-                job_evaluado["motivo_match"] = datos_eval.get("motivo_match", "Sin justificacion")
-                lote_completo.append(job_evaluado)
-                
-            return lote_completo
 
-        except (ServerError, APIError) as e:
-            # Imprime el detalle real de Google
-            print(f"      [Aviso Google]: {e}")
-            espera = intento * 5
-            time.sleep(espera)
-        except Exception as e:
-            print(f"      [Error]: {e}")
-            time.sleep(3)
-            
-    raise RuntimeError("No se pudo evaluar el bloque tras 3 intentos.")
+  # 2. Intentos con pausas escalonadas para tolerar errores 503 o 429
+  for intento in range(1, 5):
+    try:
+      res = client.models.generate_content(
+          model="gemini-3.6-flash",
+          contents=prompt,
+          config={"response_mime_type": "application/json"},
+      )
+
+      raw_text = res.text.strip()
+      # Limpieza preventiva por si incluye bloques de código markdown
+      if raw_text.startswith("```"):
+        raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+      evaluaciones = json.loads(raw_text)
+
+      # Si por alguna razon devuelve un objeto contenedor {"ofertas": [...]}, extraemos la lista
+      if isinstance(evaluaciones, dict):
+        for v in evaluaciones.values():
+          if isinstance(v, list):
+            evaluaciones = v
+            break
+
+      # 3. Mapear las notas devueltas con el objeto completo original (preservando el link intacto)
+      eval_map = {
+          item.get("id"): item
+          for item in evaluaciones
+          if isinstance(item, dict)
+      }
+      lote_completo = []
+      for i, original in enumerate(batch_jobs):
+        datos_eval = eval_map.get(i, {})
+        job_evaluado = original.copy()
+        job_evaluado["match_score"] = datos_eval.get("match_score", 0)
+        job_evaluado["motivo_match"] = datos_eval.get(
+            "motivo_match", "Sin justificacion"
+        )
+        lote_completo.append(job_evaluado)
+
+      return lote_completo
+
+    except (ServerError, APIError) as e:
+      espera = intento * 15  # 15s, 30s, 45s, 60s
+      print(
+          f"      [Demanda en Google (503/429)]. Intento {intento}/4. Pausando"
+          f" {espera}s..."
+      )
+      time.sleep(espera)
+    except Exception as e:
+      print(f"      [Aviso intento {intento}/4]: {e}")
+      time.sleep(5)
+
+  # Si falla tras 4 intentos, omite el bloque en vez de romper la ejecucion global
+  print(
+      "      [Aviso] Se omite este bloque puntual tras 4 intentos para no"
+      " frenar la corrida."
+  )
+  return []
 
 def evaluar_con_gemini(jobs: list, criterios: str) -> list:
     client = genai.Client(api_key=GEMINI_API_KEY)
