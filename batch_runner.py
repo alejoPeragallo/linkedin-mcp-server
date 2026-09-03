@@ -513,9 +513,9 @@ def procesar_todos_los_perfiles():
             
     raw_jobs = ofertas_limpias
 
-    if len(raw_jobs) > 60:
-      print(f"  [Aviso] Se redujo a 60 vacantes con potencial para conservar cuota.")
-      raw_jobs = raw_jobs[:60]
+    if len(raw_jobs) > 100:
+      print(f"  [Aviso] Se redujo a 100 vacantes con potencial para conservar cuota.")
+      raw_jobs = raw_jobs[:100]
 
     if not raw_jobs:
       print("  No se encontraron ofertas hoy para este perfil.")
