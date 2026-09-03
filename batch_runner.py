@@ -95,7 +95,7 @@ def fetch_jobs_candidato(config: dict) -> list:
           search_term=clean_term if clean_term else "empleos",
           location=ubicacion,
           results_wanted=30,
-          hours_old=24,
+          hours_old=72,
           country_indeed=c_info["indeed_code"],
       )
       if jobs_df is not None and not jobs_df.empty:
