@@ -44,10 +44,13 @@ with st.sidebar:
     )
     country_info = COUNTRIES_CONFIG[selected_country_name]
     
+    # Definir todos los portales disponibles
+    AVAILABLE_SITES = ["linkedin", "indeed", "computrabajo", "google", "glassdoor", "zip_recruiter"]
+    
     selected_sites = st.multiselect(
         "Portales a rastrear:",
-        options=["linkedin", "indeed", "computrabajo", "google", "glassdoor", "zip_recruiter"],
-        default=["linkedin", "indeed", "computrabajo", "google"],
+        options=AVAILABLE_SITES,
+        default=AVAILABLE_SITES,  # Ahora selecciona los 6 portales automáticamente
         help="Google Jobs indexa vacantes de Bumeran y Zonajobs"
     )
     
@@ -59,6 +62,7 @@ with st.sidebar:
     
     location = st.text_input("Ubicacion / Municipio / Ciudad:", value=country_info["default_loc"])
     
+    # Selector de Radio de Distancia
     radius_options = {
         "Sin limite / Amplio": None,
         "10 km": 6,
@@ -88,6 +92,7 @@ with st.sidebar:
     
     only_remote = st.checkbox("Solo puestos 100% Remotos", value=False)
     
+    # Filtro de afinidad minima
     min_match_score = st.slider(
         "Compatibilidad minima a mostrar (%):",
         min_value=0,

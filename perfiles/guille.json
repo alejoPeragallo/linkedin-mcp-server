@@ -1,0 +1,20 @@
+{
+  "activo": true,
+  "nombre": "Emiliano",
+  "email": "epifguillen@gmail.com",
+  "pais": "Argentina",
+  "ubicacion": "Buenos Aires, Argentina",
+  "palabras_clave": [
+    "Logistica",
+    "Supply Chain",
+    "Operaciones Junior"
+  ],
+  "score_minimo": 70,
+  "criterios": [
+    "Puestos afines: Logistica, Supply Chain, Operaciones, Planificacion, Distribucion, Inventarios o Customer Service Logistico",
+    "Nivel: Pasantia, Trainee o Junior (Entry level)",
+    "Herramientas valoradas: Excel avanzado, Power BI, SQL, Python, Power Query",
+    "Modalidad: Hibrida, Remota o Presencial indistinto",
+    "Descartar: Soporte tecnico IT puro, puestos Semi Senior o Senior (+2 anos de experiencia), Jefaturas y Coordinaciones"
+  ]
+}

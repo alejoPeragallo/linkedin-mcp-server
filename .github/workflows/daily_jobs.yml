@@ -1,0 +1,35 @@
+name: Envio Diario de Empleos
+
+on:
+  schedule:
+    # 11:00 UTC equivale a las 08:00 AM en Argentina (UTC-3)
+    - cron: '0 11 * * *'
+  workflow_dispatch: # Habilita un botón para probarlo manualmente cuando quieras
+
+jobs:
+  ejecutar-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar codigo del repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar gestor uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "latest"
+
+      - name: Instalar Python 3.12
+        run: uv python install 3.12
+
+      - name: Instalar dependencias
+        run: |
+          uv add python-jobspy openpyxl google-genai beautifulsoup4 requests pandas
+
+      - name: Ejecutar script multi-perfil
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: |
+          uv run python batch_runner.py

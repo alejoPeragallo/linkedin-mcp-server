@@ -1,0 +1,20 @@
+{
+  "activo": true,
+  "nombre": "Candela Lacaze",
+  "email": "mariacandelalacaze7@gmail.com",
+  "pais": "Argentina",
+  "ubicacion": "Buenos Aires, Argentina",
+  "palabras_clave": [
+    "Diseno Grafico",
+    "Disenador Grafico Junior",
+    "Pasantia Diseno"
+  ],
+  "score_minimo": 70,
+  "criterios": [
+    "Puestos afines: Disenador Grafico, Disenador Visual, Asistente de Diseno, Branding, Diseno UI o Creador de Contenido Visual",
+    "Nivel: Estudiante universitario, Pasantia, Trainee o Junior",
+    "Herramientas valoradas: Adobe Suite (Illustrator, Photoshop, InDesign), Figma, CorelDraw, Branding",
+    "Modalidad: Remota o Hibrida preferentemente",
+    "Descartar: Operario de taller o imprenta pesada, soporte tecnico, puestos Senior (+3 anos de experiencia)"
+  ]
+}
