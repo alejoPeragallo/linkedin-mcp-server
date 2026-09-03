@@ -25,6 +25,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          GEMINI_DRY_RUN: ${{ vars.GEMINI_DRY_RUN }} 
         # --no-project evita tocar el pyproject.toml del repo (es de otro
         # proyecto, linkedin-mcp-server, y no queremos construirlo ni
         # sincronizarlo). --with arma un entorno aislado y efimero con
