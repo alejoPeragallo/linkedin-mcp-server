@@ -129,7 +129,6 @@ def fetch_jobs_candidato(config: dict) -> list:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "TU_NUEVA_CLAVE_AQUI")
 
 def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
-  # 1. Enviar solo lo esencial para ahorrar tokens y acelerar la respuesta
   items_minimos = [
       {
           "id": i,
@@ -150,10 +149,10 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
     "{criterios}"
 
     Instrucciones estrictas:
-    - Revisa la ubicacion de cada oferta contra los criterios de residencia y modalidad. Si una vacante exige presencia fisica o es hibrida en otra provincia/ciudad distinta a la del candidato, asigna un match_score menor a 30 (salvo que sea 100% remota).
+    - Filtro de Ubicacion: El candidato reside en Buenos Aires. Si una vacante es presencial o hibrida en otra provincia (ej. Cordoba, Santa Fe, Mendoza), asigna un match_score menor a 30. Solo acepta vacantes de otras provincias si la modalidad es expresamente 100% Remota.
     - match_score: entero de 0 a 100 indicando afinidad real.
     - motivo_match: justificacion concisa de 2 lineas aclarando por que encaja o por que se descarta.
-    - Devuelve UNICAMENTE un arreglo JSON con el siguiente formato:
+    - Devuelve UNICAMENTE un arreglo JSON:
     [
       {{
         "id": 0,
@@ -163,30 +162,34 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
     ]
     """
 
-  # 2. Intentos con pausas escalonadas para tolerar errores 503 o 429
-  for intento in range(1, 5):
+  # Si el modelo principal esta congestionado (503), rota a modelos alternativos
+  modelos = [
+      "gemini-2.5-flash",
+      "gemini-1.5-flash",
+      "gemini-2.5-flash",
+      "gemini-1.5-flash",
+  ]
+
+  for intento in range(4):
+    modelo_actual = modelos[intento]
     try:
       res = client.models.generate_content(
-          model="gemini-3.6-flash",
+          model=modelo_actual,
           contents=prompt,
           config={"response_mime_type": "application/json"},
       )
 
       raw_text = res.text.strip()
-      # Limpieza preventiva por si incluye bloques de código markdown
       if raw_text.startswith("```"):
         raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
       evaluaciones = json.loads(raw_text)
-
-      # Si por alguna razon devuelve un objeto contenedor {"ofertas": [...]}, extraemos la lista
       if isinstance(evaluaciones, dict):
         for v in evaluaciones.values():
           if isinstance(v, list):
             evaluaciones = v
             break
 
-      # 3. Mapear las notas devueltas con el objeto completo original (preservando el link intacto)
       eval_map = {
           item.get("id"): item
           for item in evaluaciones
@@ -204,43 +207,49 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
 
       return lote_completo
 
-    except (ServerError, APIError) as e:
-      espera = intento * 15  # 15s, 30s, 45s, 60s
+    except Exception as e:
+      espera = (intento + 1) * 10
       print(
-          f"      [Demanda en Google (503/429)]. Intento {intento}/4. Pausando"
-          f" {espera}s..."
+          f"      [Intento {intento + 1}/4 con {modelo_actual}] Error:"
+          f" {e}. Reintentando en {espera}s..."
       )
       time.sleep(espera)
-    except Exception as e:
-      print(f"      [Aviso intento {intento}/4]: {e}")
-      time.sleep(5)
 
-  # Si falla tras 4 intentos, omite el bloque en vez de romper la ejecucion global
   print(
       "      [Aviso] Se omite este bloque puntual tras 4 intentos para no"
       " frenar la corrida."
   )
   return []
 
+
 def evaluar_con_gemini(jobs: list, criterios: str) -> list:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    BATCH_SIZE = 35  # Tamaño seguro y probado
-    all_evaluated = []
-    total_jobs = len(jobs)
-    
-    total_batches = (total_jobs + BATCH_SIZE - 1) // BATCH_SIZE
-    print(f"    Evaluando {total_jobs} ofertas en {total_batches} bloques de {BATCH_SIZE}...")
-    
-    for i in range(0, total_jobs, BATCH_SIZE):
-        batch = jobs[i : i + BATCH_SIZE]
-        batch_num = (i // BATCH_SIZE) + 1
-        print(f"      -> Procesando bloque {batch_num}/{total_batches} ({len(batch)} ofertas)...")
-        
-        evaluated_batch = evaluar_lote_gemini(client, batch, criterios)
-        all_evaluated.extend(evaluated_batch)
-        time.sleep(1)
-        
-    return all_evaluated
+  if not jobs:
+    return []
+
+  api_key = os.getenv("GEMINI_API_KEY", "")
+  client = genai.Client(api_key=api_key)
+
+  # Bloques de 20 ofertas: se procesan mas rapido y evitan sobrecargar la API
+  TAMANO_LOTE = 20
+  total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
+  print(
+      f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de"
+      f" {TAMANO_LOTE}..."
+  )
+
+  todos_evaluados = []
+  for i in range(0, len(jobs), TAMANO_LOTE):
+    num_bloque = (i // TAMANO_LOTE) + 1
+    batch = jobs[i : i + TAMANO_LOTE]
+    print(
+        f"      -> Procesando bloque {num_bloque}/{total_bloques} ({len(batch)}"
+        " ofertas)..."
+    )
+    evaluated_batch = evaluar_lote_gemini(client, batch, criterios)
+    todos_evaluados.extend(evaluated_batch)
+    time.sleep(2)
+
+  return todos_evaluados
 
 
 def armar_excel(jobs: list) -> bytes:
