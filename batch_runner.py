@@ -116,7 +116,7 @@ def fetch_jobs_candidato(config: dict) -> list:
           search_term=clean_term if clean_term else "empleos",
           location=ubicacion,
           results_wanted=30,
-          hours_old=72,
+          hours_old=24,
           country_indeed=c_info["indeed_code"],
       )
       if jobs_df is not None and not jobs_df.empty:
@@ -240,7 +240,7 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
       if codigo == 429:
         # RPD (cupo diario) no tiene sentido reintentarlo: no se va a
         # resolver hasta que resetee la cuota (medianoche hora Pacifico).
-        if "per day" in mensaje or "rpd" in mensaje or "daily" in mensaje:
+        if "per day" in mensaje or "perday" in mensaje or "rpd" in mensaje or "daily" in mensaje:
           print(
               f"      [Cupo diario agotado] No tiene sentido reintentar hoy."
               f" Se aborta esta corrida. Detalle: {e}"
@@ -314,7 +314,7 @@ def evaluar_con_gemini(jobs: list, criterios: str) -> list:
   # bajo el limite de ~15 pedidos por minuto de la capa gratuita. Como este
   # script corre una vez al dia, no hay apuro: preferimos ir lento y
   # confiable a rapido y arriesgar un 429.
-  TAMANO_LOTE = 12
+  TAMANO_LOTE = 25
   PAUSA_ENTRE_BLOQUES = 8
 
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
@@ -482,6 +482,96 @@ El archivo incluye semaforos de color, analisis del puesto y enlaces directos de
 
 
 def procesar_todos_los_perfiles():
+  carpeta_perfiles = Path("perfiles")
+  if not carpeta_perfiles.exists():
+    print("Creando carpeta 'perfiles/'...")
+    carpeta_perfiles.mkdir(parents=True, exist_ok=True)
+    return
+
+  archivos_json = list(carpeta_perfiles.glob("*.json"))
+  if not archivos_json:
+    print("No se encontraron archivos .json en la carpeta 'perfiles/'.")
+    return
+
+  print(f"=== Procesando {len(archivos_json)} perfil(es) en cola ===")
+  if DRY_RUN:
+    print("=== MODO DRY RUN ACTIVO: no se va a llamar a la API de Gemini ===")
+
+  for archivo in archivos_json:
+    with open(archivo, "r", encoding="utf-8") as f:
+      config = json.load(f)
+
+    nombre = config.get("nombre", archivo.stem)
+    if not config.get("activo", True):
+      print(f"\n[SKIP] {nombre} esta pausado (activo=false).")
+      continue
+
+    email = config.get("email")
+    if not email:
+      print(f"\n[SKIP] {nombre} no tiene direccion de email.")
+      continue
+
+    min_score = config.get("score_minimo", 70)
+    criterios = config.get("criterios", "")
+    if isinstance(criterios, list):
+      criterios = "\n".join(criterios)
+
+    print(f"\n--- Candidato: {nombre} ({email}) ---")
+    print("  1. Rastreando portales multi-termino...")
+    raw_jobs = fetch_jobs_candidato(config)
+
+    # --- NUEVA RED DE SEGURIDAD PARA CUOTA API ---
+    # Limita la evaluacion a un maximo de 60 ofertas por persona
+    if len(raw_jobs) > 60:
+      print(f"  [Aviso] Se redujo de {len(raw_jobs)} a 60 vacantes para conservar cuota.")
+      raw_jobs = raw_jobs[:60]
+    # ---------------------------------------------
+
+    if not raw_jobs:
+      print("  No se encontraron ofertas hoy para este perfil.")
+      continue
+    
+    # Imprimimos el numero real que va a ir a la API
+    print(f"  Total vacantes unicas a evaluar: {len(raw_jobs)}")
+
+    print("  2. Evaluando con Gemini 3.6 Flash...")
+    evaluated_jobs = evaluar_con_gemini(raw_jobs, criterios)
+
+    filtered_jobs = [
+        j for j in evaluated_jobs if j.get("match_score", 0) >= min_score
+    ]
+    filtered_jobs.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+
+    if not filtered_jobs:
+      print(
+          f"  Ninguna vacante alcanzo el umbral de {min_score}%. No se envia"
+          " correo."
+      )
+      continue
+
+    print(
+        f"  3. Generando Excel y enviando correo ({len(filtered_jobs)} vacantes"
+        " calificadas)..."
+    )
+    excel_bytes = armar_excel(filtered_jobs)
+
+    # Copia de seguridad en disco
+    respaldo_nombre = f"Ultimo_Reporte_{nombre.replace(' ', '_')}.xlsx"
+    with open(respaldo_nombre, "wb") as f:
+      f.write(excel_bytes)
+    print(f"  -> Planilla guardada localmente en '{respaldo_nombre}'")
+
+    enviar_correo(
+        email,
+        nombre,
+        excel_bytes,
+        len(evaluated_jobs),
+        len(filtered_jobs),
+        min_score,
+    )
+    print(f"  ¡Reporte despachado exitosamente a {email}!")
+
+  print("\n=== Procesamiento finalizado con exito ===")
   carpeta_perfiles = Path("perfiles")
   if not carpeta_perfiles.exists():
     print("Creando carpeta 'perfiles/'...")
