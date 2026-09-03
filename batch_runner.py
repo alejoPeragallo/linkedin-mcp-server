@@ -2,6 +2,7 @@ from email.message import EmailMessage
 import io
 import json
 import os
+import random
 from pathlib import Path
 import smtplib
 import time
@@ -19,6 +20,11 @@ MI_GMAIL = os.getenv("EMAIL_SENDER", "")
 MI_CLAVE_16_LETRAS = os.getenv("EMAIL_PASSWORD", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# Modo de prueba: si esta en "1", NO se llama a la API de Gemini real.
+# Se generan scores/justificaciones simuladas para poder probar todo
+# el resto del pipeline (scraping, excel, mail) sin gastar cuota.
+DRY_RUN = os.getenv("GEMINI_DRY_RUN", "0") == "1"
+
 COUNTRIES_CONFIG = {
     "Argentina": {
         "indeed_code": "argentina",
@@ -34,6 +40,16 @@ COUNTRIES_CONFIG = {
     "Uruguay": {"indeed_code": "uruguay", "computrabajo_domain": "uy.computrabajo.com"},
     "Estados Unidos": {"indeed_code": "usa", "computrabajo_domain": None},
 }
+
+# Provincias/ciudades argentinas que NO son Buenos Aires. Se usan como red
+# de seguridad despues de la evaluacion de Gemini: si el LLM se "olvida"
+# de aplicar el filtro geografico que le pedimos en el prompt, esto lo
+# corrige igual de forma deterministica.
+PROVINCIAS_EXCLUIDAS = [
+    "cordoba", "córdoba", "santa fe", "rosario", "mendoza",
+    "salta", "tucuman", "tucumán", "neuquen", "neuquén",
+    "misiones", "chaco", "entre rios", "entre ríos", "san juan",
+]
 
 
 def scrape_computrabajo(query: str, domain: str, loc: str, limit: int = 15):
@@ -69,8 +85,13 @@ def scrape_computrabajo(query: str, domain: str, loc: str, limit: int = 15):
               "ubicacion": loc_elem.get_text(strip=True) if loc_elem else loc,
               "enlace": f"https://{domain}" + title_elem.get("href", ""),
           })
-  except Exception:
-    pass
+    else:
+      print(
+          f"      [Aviso Computrabajo] Respuesta {response.status_code} en"
+          f" {url}"
+      )
+  except Exception as e:
+    print(f"      [Aviso Computrabajo] Fallo al rastrear {url}: {e}")
   return jobs
 
 
@@ -125,23 +146,10 @@ def fetch_jobs_candidato(config: dict) -> list:
   return raw_list
 
 
-# Coloca aquí tu NUEVA API Key:
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "TU_NUEVA_CLAVE_AQUI")
-
-def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
-  items_minimos = [
-      {
-          "id": i,
-          "titulo": job.get("titulo", ""),
-          "empresa": job.get("empresa", ""),
-          "ubicacion": job.get("ubicacion", ""),
-      }
-      for i, job in enumerate(batch_jobs)
-  ]
-
-  prompt = f"""
+def _prompt_evaluacion(items_minimos: list, criterios: str) -> str:
+  return f"""
     Eres un reclutador corporativo evaluando ofertas laborales.
-    
+
     Vacantes a evaluar:
     {json.dumps(items_minimos, ensure_ascii=False)}
 
@@ -162,8 +170,32 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
     ]
     """
 
-  # Tiempos de espera largos (Filosofia: Resiliencia sobre velocidad)
-  tiempos_espera = [30, 60, 90]
+
+def _evaluacion_simulada(batch_jobs: list) -> list:
+  """Genera evaluaciones falsas para probar el pipeline sin llamar a la API."""
+  lote_completo = []
+  for job in batch_jobs:
+    job_evaluado = job.copy()
+    job_evaluado["match_score"] = random.randint(40, 95)
+    job_evaluado["motivo_match"] = "[DRY RUN] Evaluacion simulada, no se llamo a Gemini."
+    lote_completo.append(job_evaluado)
+  return lote_completo
+
+
+def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
+  if DRY_RUN:
+    return _evaluacion_simulada(batch_jobs)
+
+  items_minimos = [
+      {
+          "id": i,
+          "titulo": job.get("titulo", ""),
+          "empresa": job.get("empresa", ""),
+          "ubicacion": job.get("ubicacion", ""),
+      }
+      for i, job in enumerate(batch_jobs)
+  ]
+  prompt = _prompt_evaluacion(items_minimos, criterios)
 
   for intento in range(4):
     try:
@@ -201,42 +233,116 @@ def evaluar_lote_gemini(client, batch_jobs: list, criterios: str) -> list:
 
       return lote_completo
 
-    except Exception as e:
-      if intento < 3:
-        espera = tiempos_espera[intento]
-        print(f"      [Aviso Google API - Intento {intento + 1}/4 fallido]: {e}")
-        print(f"      Pausando {espera} segundos para garantizar descongestion...")
-        time.sleep(espera)
-      else:
-        print(f"      [Error critico] Se omite este bloque tras 4 intentos. Error: {e}")
+    except APIError as e:
+      codigo = getattr(e, "code", None)
+      mensaje = str(e).lower()
 
+      if codigo == 429:
+        # RPD (cupo diario) no tiene sentido reintentarlo: no se va a
+        # resolver hasta que resetee la cuota (medianoche hora Pacifico).
+        if "per day" in mensaje or "rpd" in mensaje or "daily" in mensaje:
+          print(
+              f"      [Cupo diario agotado] No tiene sentido reintentar hoy."
+              f" Se aborta esta corrida. Detalle: {e}"
+          )
+          raise
+        espera = 65
+        print(
+            f"      [429 - limite por minuto, intento {intento + 1}/4]"
+            f" Esperando {espera}s. Detalle: {e}"
+        )
+        time.sleep(espera)
+
+      elif codigo == 503:
+        espera = [15, 30, 60][min(intento, 2)]
+        print(
+            f"      [503 - servidor saturado, intento {intento + 1}/4]"
+            f" Esperando {espera}s. Detalle: {e}"
+        )
+        time.sleep(espera)
+
+      else:
+        # Errores como 400 (prompt invalido) o 403 (clave/permmisos) son
+        # permanentes: reintentar no cambia nada, mejor cortar ya.
+        print(f"      [Error no recuperable de la API] {e}")
+        break
+
+    except ServerError as e:
+      espera = [15, 30, 60][min(intento, 2)]
+      print(
+          f"      [Servidor no disponible, intento {intento + 1}/4]"
+          f" Esperando {espera}s. Detalle: {e}"
+      )
+      time.sleep(espera)
+
+    except Exception as e:
+      print(f"      [Error inesperado, intento {intento + 1}/4]: {e}")
+      break
+
+  print("      [Error critico] Se omite este bloque tras agotar los reintentos.")
   return []
+
+
+def aplicar_filtro_geografico(jobs: list) -> list:
+  """Red de seguridad: si Gemini no respeto el filtro geografico del
+  prompt, esto lo corrige de forma deterministica en Python."""
+  for job in jobs:
+    ubicacion = job.get("ubicacion", "").lower()
+    es_remoto = any(p in ubicacion for p in ("remoto", "remote", "home office"))
+    es_otra_provincia = any(p in ubicacion for p in PROVINCIAS_EXCLUIDAS)
+    if es_otra_provincia and not es_remoto:
+      score_original = job.get("match_score", 0)
+      job["match_score"] = min(score_original, 20)
+      if not job.get("motivo_match", "").startswith("[Filtro geografico]"):
+        job["motivo_match"] = (
+            "[Filtro geografico] Descartado por ubicacion fuera de Buenos"
+            f" Aires y no remoto. {job.get('motivo_match', '')}"
+        )
+  return jobs
 
 
 def evaluar_con_gemini(jobs: list, criterios: str) -> list:
   if not jobs:
     return []
 
-  api_key = os.getenv("GEMINI_API_KEY", "")
-  client = genai.Client(api_key=api_key)
+  client = None
+  if not DRY_RUN:
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    client = genai.Client(api_key=api_key)
 
-  TAMANO_LOTE = 20
+  # Lotes mas chicos y pausas mas largas entre bloques para quedar comodos
+  # bajo el limite de ~15 pedidos por minuto de la capa gratuita. Como este
+  # script corre una vez al dia, no hay apuro: preferimos ir lento y
+  # confiable a rapido y arriesgar un 429.
+  TAMANO_LOTE = 12
+  PAUSA_ENTRE_BLOQUES = 8
+
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
   print(f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de {TAMANO_LOTE}...")
+  if DRY_RUN:
+    print("    [DRY RUN activo] No se va a llamar a la API real de Gemini.")
 
   todos_evaluados = []
   for i in range(0, len(jobs), TAMANO_LOTE):
     num_bloque = (i // TAMANO_LOTE) + 1
     batch = jobs[i : i + TAMANO_LOTE]
     print(f"      -> Procesando bloque {num_bloque}/{total_bloques} ({len(batch)} ofertas)...")
-    
-    evaluated_batch = evaluar_lote_gemini(client, batch, criterios)
-    todos_evaluados.extend(evaluated_batch)
-    
-    # Pausa de cortesia entre bloques exitosos para cuidar la cuota
-    time.sleep(5) 
 
+    try:
+      evaluated_batch = evaluar_lote_gemini(client, batch, criterios)
+    except APIError:
+      # Cupo diario agotado: no seguimos gastando tiempo en mas bloques.
+      print("    Se corta la evaluacion del resto de los bloques por hoy.")
+      break
+
+    todos_evaluados.extend(evaluated_batch)
+
+    if not DRY_RUN and num_bloque < total_bloques:
+      time.sleep(PAUSA_ENTRE_BLOQUES)
+
+  todos_evaluados = aplicar_filtro_geografico(todos_evaluados)
   return todos_evaluados
+
 
 def armar_excel(jobs: list) -> bytes:
   df = pd.DataFrame(jobs)
@@ -322,21 +428,19 @@ def armar_excel(jobs: list) -> bytes:
 
 def conectar_y_enviar_smtp(msg: EmailMessage):
   clave_limpia = MI_CLAVE_16_LETRAS.strip().replace(" ", "")
-  cuentas_a_probar = ["alejoperagallo00@gmail.com", "alejoperagallo@gmail.com"]
+  cuenta = MI_GMAIL.strip()
 
-  ultimo_error = None
+  if not cuenta:
+    raise RuntimeError(
+        "Falta configurar la variable de entorno EMAIL_SENDER con la cuenta"
+        " que genero la contrasena de aplicacion."
+    )
+
   with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-    for cuenta in cuentas_a_probar:
-      try:
-        smtp.login(cuenta, clave_limpia)
-        msg["From"] = cuenta
-        smtp.send_message(msg)
-        print(f"  -> Conectado y enviado exitosamente desde: {cuenta}")
-        return
-      except smtplib.SMTPAuthenticationError as e:
-        ultimo_error = e
-        continue
-    raise ultimo_error
+    smtp.login(cuenta, clave_limpia)
+    msg["From"] = cuenta
+    smtp.send_message(msg)
+    print(f"  -> Conectado y enviado exitosamente desde: {cuenta}")
 
 
 def enviar_correo(
@@ -390,6 +494,8 @@ def procesar_todos_los_perfiles():
     return
 
   print(f"=== Procesando {len(archivos_json)} perfil(es) en cola ===")
+  if DRY_RUN:
+    print("=== MODO DRY RUN ACTIVO: no se va a llamar a la API de Gemini ===")
 
   for archivo in archivos_json:
     with open(archivo, "r", encoding="utf-8") as f:
