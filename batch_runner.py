@@ -307,8 +307,8 @@ def evaluar_con_groq(jobs: list, criterios: str) -> list:
       raise RuntimeError("Falta configurar la variable de entorno GROQ_API_KEY.")
     client = Groq(api_key=api_key)
 
-  TAMANO_LOTE = 15
-  PAUSA_ENTRE_BLOQUES = 2
+  TAMANO_LOTE = 5
+  PAUSA_ENTRE_BLOQUES = 3
 
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
   print(f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de {TAMANO_LOTE} con Groq...")
