@@ -215,6 +215,7 @@ def evaluar_lote_groq(client, batch_jobs: list, criterios: str) -> list:
           messages=[{"role": "user", "content": prompt}],
           model=modelo,
           temperature=0.2,
+          max_tokens=400,  # Límite estricto para no superar los 1000 tokens de salida por minuto
       )
 
       raw_text = chat_completion.choices[0].message.content.strip()
@@ -254,14 +255,14 @@ def evaluar_lote_groq(client, batch_jobs: list, criterios: str) -> list:
     except Exception as e:
       mensaje = str(e).lower()
       if "429" in mensaje or "rate_limit" in mensaje:
-        espera = 20 * (intento + 1)
+        espera = 25 * (intento + 1)
         print(
             f"      [429 - Limite de Groq, intento {intento + 1}/4]"
             f" Esperando {espera}s. Detalle: {e}"
         )
         time.sleep(espera)
       elif "503" in mensaje or "overloaded" in mensaje:
-        espera = [10, 20, 40][min(intento, 2)]
+        espera = [15, 30, 60][min(intento, 2)]
         print(
             f"      [503 - Servidor Groq saturado, intento {intento + 1}/4]"
             f" Esperando {espera}s. Detalle: {e}"
@@ -279,6 +280,7 @@ def evaluar_lote_groq(client, batch_jobs: list, criterios: str) -> list:
     job_fallido["motivo_match"] = "[Aviso] No analizado por la IA (error de respuesta del proveedor). Revisar manualmente."
     lote_de_emergencia.append(job_fallido)
   return lote_de_emergencia
+
 
 def aplicar_filtro_geografico(jobs: list) -> list:
   for job in jobs:
@@ -308,7 +310,7 @@ def evaluar_con_groq(jobs: list, criterios: str) -> list:
     client = Groq(api_key=api_key)
 
   TAMANO_LOTE = 5
-  PAUSA_ENTRE_BLOQUES = 3
+  PAUSA_ENTRE_BLOQUES = 15
 
   total_bloques = (len(jobs) + TAMANO_LOTE - 1) // TAMANO_LOTE
   print(f"    Evaluando {len(jobs)} ofertas en {total_bloques} bloques de {TAMANO_LOTE} con Groq...")
@@ -325,6 +327,7 @@ def evaluar_con_groq(jobs: list, criterios: str) -> list:
     todos_evaluados.extend(evaluated_batch)
 
     if not DRY_RUN and num_bloque < total_bloques:
+      print(f"      [Pausa de pacing] Esperando {PAUSA_ENTRE_BLOQUES}s para evitar rate limit de Groq...")
       time.sleep(PAUSA_ENTRE_BLOQUES)
 
   todos_evaluados = aplicar_filtro_geografico(todos_evaluados)
